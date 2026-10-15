@@ -1,0 +1,22 @@
+{
+  "name": "EnderSMP",
+  "minecraft": "1.20.1",
+  "loader": "forge",
+  "forge": "47.4.12",
+  "version": "74ca0199",
+  "mirrorDirs": [
+    "mods"
+  ],
+  "files": [
+    {
+      "path": "mods/entityculling-forge-1.11.3-mc1.20.1.jar",
+      "sha1": "d3c513e88ef9f5cdd7e27d17d923d4dca69c6d55",
+      "size": 1515076
+    },
+    {
+      "path": "mods/ferritecore-6.0.1-forge.jar",
+      "sha1": "417fb6ce8f52abf40bd9d0390371790f9576f8ba",
+      "size": 123034
+    }
+  ]
+}

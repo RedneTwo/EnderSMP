@@ -1,0 +1,26 @@
+{
+  "_ayuda": "Cambia lo que quieras y súbelo a GitHub. Colores en formato #RRGGBB. Si borras una línea, se usa el valor por defecto.",
+
+  "titulo": "EnderSMP",
+  "subtitulo": "Modpack · Minecraft 1.20.1 · Forge 47.4.12",
+  "tituloVentana": "EnderSMP Launcher",
+  "tituloNovedades": "Novedades",
+  "tamanoTitulo": 60,
+
+  "colorTitulo": "#FFFFFF",
+  "texto": "#EEE8F6",
+  "textoSecundario": "#A597BC",
+  "botones": "#5FE3B4",
+  "botonesHover": "#C9F7E6",
+  "textoBotones": "#0A0612",
+  "barraInicio": "#8A5CD0",
+  "dialogos": "#1B1128",
+
+  "fondoArriba": "#0A0612",
+  "fondoAbajo": "#2B1745",
+  "oscurecerFondo": 0.35,
+
+  "logoGira": true,
+  "halo": true,
+  "tamanoLogo": 1.0
+}
