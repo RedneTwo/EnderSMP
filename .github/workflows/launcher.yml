@@ -1,0 +1,85 @@
+name: Compilar launcher
+
+# Compila el launcher y, si LAUNCHER_VERSION (en launcher-src/Launcher.java) es nueva,
+# lo publica en Releases como v<versión>:
+#  - EnderSMP-Launcher-Windows.zip : carpeta con el .exe y Java incluido
+#  - EnderSMP-Launcher.jar         : para quien ya tenga Java 21
+on:
+  push:
+    branches: [main]
+    paths: ["launcher-src/**", "launcher-assets/icono.png", ".github/workflows/launcher.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Pillow (para el icono del .exe)
+        shell: bash
+        run: python -m pip install --quiet pillow
+      - name: Leer versión
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -oP 'LAUNCHER_VERSION = "\K[0-9.]+' launcher-src/Launcher.java)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compilar
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          rm -rf build dist && mkdir -p build/classes build/lib dist
+          M=https://repo1.maven.org/maven2
+          curl -fsSL -o build/lib/sqlite-jdbc.jar "$M/org/xerial/sqlite-jdbc/3.46.1.0/sqlite-jdbc-3.46.1.0.jar"
+          curl -fsSL -o build/lib/slf4j-api.jar   "$M/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
+          curl -fsSL -o build/lib/slf4j-nop.jar   "$M/org/slf4j/slf4j-nop/2.0.16/slf4j-nop-2.0.16.jar"
+
+          # Imágenes y tema de launcher-assets/ dentro del launcher (por si no hay internet)
+          for f in logo.png icono.png tema.json; do
+            if [[ -f "launcher-assets/$f" ]]; then cp "launcher-assets/$f" "launcher-src/resources/$f"; fi
+          done
+          # Icono del .exe a partir de launcher-assets/icono.png
+          if [[ -f launcher-assets/icono.png ]]; then
+            python -c "from PIL import Image; Image.open('launcher-assets/icono.png').convert('RGBA').save('launcher-src/icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          fi
+
+          javac -encoding UTF-8 -cp "build/lib/sqlite-jdbc.jar;build/lib/slf4j-api.jar" -d build/classes launcher-src/Launcher.java
+          ( cd build/classes && for j in ../lib/*.jar; do jar xf "$j"; done && rm -rf META-INF/MANIFEST.MF META-INF/*.SF META-INF/*.RSA META-INF/versions module-info.class )
+          printf "Main-Class: Launcher\n" > build/manifest.txt
+          jar cfm dist/EnderSMP-Launcher.jar build/manifest.txt -C build/classes . -C launcher-src/resources .
+
+          jpackage --type app-image --name "EnderSMP Launcher" --app-version "$VERSION" \
+            --input dist --main-jar EnderSMP-Launcher.jar --main-class Launcher --icon launcher-src/icon.ico \
+            --add-modules java.se,jdk.crypto.ec,jdk.zipfs,jdk.unsupported,jdk.charsets,jdk.localedata \
+            --jlink-options "--strip-debug --no-man-pages --no-header-files" --dest build/app
+          cd build/app && 7z a ../../dist/EnderSMP-Launcher-Windows.zip "EnderSMP Launcher"
+      - name: Publicar release
+        if: steps.ver.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Launcher ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/EnderSMP-Launcher-Windows.zip
+            dist/EnderSMP-Launcher.jar
+      - name: Guardar como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: dist/
