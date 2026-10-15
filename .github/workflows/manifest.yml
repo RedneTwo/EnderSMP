@@ -1,0 +1,55 @@
+name: Actualizar manifest
+ 
+# Cada vez que cambias algo dentro de Modpack/, regenera manifest.json
+# (la lista de archivos que el launcher descarga a los jugadores)
+on:
+  push:
+    branches: [main]
+    paths: ["Modpack/**", ".github/workflows/manifest.yml"]
+  workflow_dispatch:
+ 
+permissions:
+  contents: write
+ 
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generar manifest.json
+        shell: python
+        run: |
+          import hashlib, json, os
+          ROOT = "Modpack"          # carpeta con mods/, config/… (ojo a las mayúsculas)
+          MINECRAFT = "1.20.1"
+          FORGE = "47.4.12"         # versión de Forge de los perfiles nuevos
+          MIRROR_DIRS = ["mods"]    # carpetas que quedan idénticas a GitHub (se borra lo que sobre)
+          SKIP = {".gitkeep", ".DS_Store", "Thumbs.db", "desktop.ini"}
+          files = []
+          for dirpath, _, names in os.walk(ROOT):
+              for n in names:
+                  if n in SKIP or n.endswith((".bak", ".part", ".tmp")):
+                      continue
+                  full = os.path.join(dirpath, n)
+                  rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
+                  with open(full, "rb") as fh:
+                      sha = hashlib.sha1(fh.read()).hexdigest()
+                  files.append({"path": rel, "sha1": sha, "size": os.path.getsize(full)})
+          files.sort(key=lambda f: f["path"].lower())
+          version = hashlib.sha1("".join(f["path"] + f["sha1"] for f in files).encode()).hexdigest()[:8]
+          manifest = {"name": "EnderSMP", "minecraft": MINECRAFT, "loader": "forge", "forge": FORGE,
+                      "version": version, "mirrorDirs": MIRROR_DIRS, "files": files}
+          with open("manifest.json", "w", encoding="utf-8") as fh:
+              json.dump(manifest, fh, indent=2, ensure_ascii=False)
+              fh.write("\n")
+          print(f"manifest.json: {len(files)} archivos, versión {version}")
+      - name: Guardar manifest.json
+        run: |
+          if git diff --quiet -- manifest.json; then
+            echo "Sin cambios"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "Actualizar manifest.json"
+          git push
