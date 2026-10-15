@@ -3,11 +3,16 @@
   "minecraft": "1.20.1",
   "loader": "forge",
   "forge": "47.4.12",
-  "version": "74ca0199",
+  "version": "0b656eaf",
   "mirrorDirs": [
     "mods"
   ],
   "files": [
+    {
+      "path": "config",
+      "sha1": "adc83b19e793491b1c6ea0fd8b46cd9f32e592fc",
+      "size": 1
+    },
     {
       "path": "mods/entityculling-forge-1.11.3-mc1.20.1.jar",
       "sha1": "d3c513e88ef9f5cdd7e27d17d923d4dca69c6d55",
