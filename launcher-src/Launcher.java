@@ -28,7 +28,7 @@ public class Launcher {
     static final String PACK_NAME = "EnderSMP";
     static final String REPO = "RedneTwo/EnderSMP";      // usuario/repositorio de GitHub
     static final String BRANCH = "main";
-    static final String LAUNCHER_VERSION = "1.0.1";     // súbelo al publicar un launcher nuevo
+    static final String LAUNCHER_VERSION = "1.0.2";     // súbelo al publicar un launcher nuevo
     static final String RAM = "-Xmx6G";                  // memoria para el perfil del launcher oficial
     static final String PACK_DIR = "Modpack";           // carpeta del repositorio con mods/, config/… (ojo a las mayúsculas)
     static final boolean AUTO_UPDATE = true;            // actualizar el modpack solo al abrir el launcher
@@ -444,6 +444,8 @@ public class Launcher {
             Path custom = modrinthCustomDir(cfg);
             if (custom != null) l.add(custom.resolve("Modrinth App.exe").toString());
         }
+        Path chosen = chosenModrinthProfiles();
+        if (chosen != null && chosen.getParent() != null) l.add(chosen.getParent().resolve("Modrinth App.exe").toString());
         return l;
     }
 
@@ -496,8 +498,14 @@ public class Launcher {
         try (var rs = c.getMetaData().getTables(null, null, table, null)) { return rs.next(); }
     }
 
+    static final Map<Path, Optional<Path>> CUSTOM_DIR_CACHE = new HashMap<>();
+
     /** Carpeta de datos elegida en Ajustes de Modrinth ("App directory"), o null si es la de por defecto. */
-    static Path modrinthCustomDir(Path configDir) {
+    static synchronized Path modrinthCustomDir(Path configDir) {
+        return CUSTOM_DIR_CACHE.computeIfAbsent(configDir, d -> Optional.ofNullable(readModrinthCustomDir(d))).orElse(null);
+    }
+
+    static Path readModrinthCustomDir(Path configDir) {
         String dir = withModrinthDb(configDir, c -> {
             if (!hasTable(c, "settings")) return null;
             try (var st = c.prepareStatement("SELECT custom_dir FROM settings LIMIT 1"); var rs = st.executeQuery()) {
@@ -510,12 +518,43 @@ public class Launcher {
     /** Todas las carpetas "profiles" de Modrinth: la de por defecto y la personalizada (p. ej. E:\\Modrinth\\profiles). */
     static List<Path> modrinthProfileRoots() {
         List<Path> roots = new ArrayList<>();
+        Path chosen = chosenModrinthProfiles();
+        if (chosen != null) roots.add(chosen);
         for (Path cfg : modrinthConfigDirs()) {
             Path custom = modrinthCustomDir(cfg);
             if (custom != null) roots.add(custom.resolve("profiles"));
             roots.add(cfg.resolve("profiles"));
         }
         return roots;
+    }
+
+    /** Carpeta "profiles" que el jugador eligió a mano en el launcher (o null). */
+    static Path chosenModrinthProfiles() {
+        String v = settings != null ? settings.getProperty("modrinthProfiles") : null;
+        return v == null || v.isBlank() ? null : Paths.get(v);
+    }
+
+    /** La carpeta de perfiles que el launcher cree que usa Modrinth en este PC (para proponerla). */
+    static Path guessModrinthProfiles() {
+        Path chosen = chosenModrinthProfiles();
+        if (chosen != null) return chosen;
+        List<Path> roots = new ArrayList<>(modrinthProfileRoots());
+        for (Path r : roots) if (!subdirs(r).isEmpty()) return r;   // la primera que tenga perfiles
+        for (Path r : roots) if (Files.isDirectory(r)) return r;
+        return roots.isEmpty() ? appData().resolve("ModrinthApp").resolve("profiles") : roots.get(0);
+    }
+
+    /**
+     * Acepta lo que elija el jugador: la carpeta "profiles", la carpeta de Modrinth que la contiene
+     * o incluso un perfil concreto (se sube a "profiles").
+     */
+    static Path normalizeProfilesDir(Path p) {
+        if (p == null) return null;
+        if (p.getFileName() != null && p.getFileName().toString().equalsIgnoreCase("profiles")) return p;
+        if (Files.isDirectory(p.resolve("profiles"))) return p.resolve("profiles");
+        Path parent = p.getParent();
+        if (parent != null && parent.getFileName() != null && parent.getFileName().toString().equalsIgnoreCase("profiles")) return parent;
+        return p;
     }
 
     /**
@@ -579,6 +618,8 @@ public class Launcher {
     // ---------- Crear la instancia automáticamente ----------
 
     static boolean modrinthInstalled() {
+        Path chosen = chosenModrinthProfiles();
+        if (chosen != null && Files.isDirectory(chosen)) return true;
         return Files.isDirectory(appData().resolve("ModrinthApp")) || Files.isDirectory(appData().resolve("com.modrinth.theseus"));
     }
 
@@ -1169,7 +1210,11 @@ public class Launcher {
         if (firstTime && !anyLauncherInstalled()) { noLauncher(f); return; }
         boolean m = modrinthInstalled(), p = prismInstalled();
         // Ya existe un perfil "EnderSMP" en Modrinth/Prism: se usa directamente y se recuerda
-        if (firstTime && target.kind() != Kind.OFFICIAL) setTarget(target, true);
+        if (firstTime && target.kind() != Kind.OFFICIAL) {
+            if (target.kind() == Kind.MODRINTH && chosenModrinthProfiles() == null && target.dir().getParent() != null)
+                saveModrinthProfiles(target.dir().getParent());
+            setTarget(target, true);
+        }
         if (!firstTime || target.kind() != Kind.OFFICIAL || (!m && !p)) { check(); return; }
         List<String> opts = new ArrayList<>();
         if (m) opts.add("Modrinth");
@@ -1179,12 +1224,69 @@ public class Launcher {
                         + " con Forge ya instalado; no tienes que configurar nada.",
                 PACK_NAME, JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, opts.toArray(), opts.get(0));
         String pick = r >= 0 ? opts.get(r) : "Launcher oficial";
-        if (pick.equals("Modrinth")) createInstance(Kind.MODRINTH);
+        if (pick.equals("Modrinth")) {
+            if (!askModrinthProfiles(f)) { check(); return; }
+            // ¿Ya hay un perfil del pack en esa carpeta? Entonces no hace falta crear otro
+            for (Target t : detectTargets())
+                if (t.kind() == Kind.MODRINTH && t.dir().startsWith(chosenModrinthProfiles())
+                        && t.name().toLowerCase(Locale.ROOT).contains(PACK_NAME.toLowerCase(Locale.ROOT))) { chooseTarget(t); return; }
+            createInstance(Kind.MODRINTH);
+        }
         else if (pick.equals("Prism")) createInstance(Kind.PRISM);
         else chooseTarget(target);
     }
 
     static javax.swing.Timer waitTimer;
+
+    /**
+     * Pregunta dónde tiene Modrinth los perfiles. Propone la carpeta detectada y deja elegir otra.
+     * Devuelve false si el jugador cancela.
+     */
+    static boolean askModrinthProfiles(Component parent) {
+        Path guess = guessModrinthProfiles();
+        String[] opts = {"Sí, es esa", "Elegir otra carpeta…", "Cancelar"};
+        int r = JOptionPane.showOptionDialog(parent,
+                "¿Dónde guarda Modrinth tus perfiles?\n\n" + guess + "\n\n"
+                        + "Si en Modrinth (en sus Ajustes, App directory) usas otra carpeta,\n"
+                        + "elige la carpeta \"profiles\" que hay dentro.",
+                PACK_NAME, JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, opts, opts[0]);
+        if (r == 0) { saveModrinthProfiles(guess); return true; }
+        if (r != 1) return false;
+        return pickModrinthProfiles(parent, guess);
+    }
+
+    /** Selector de carpeta. Devuelve true si el jugador eligió una. */
+    static boolean pickModrinthProfiles(Component parent, Path start) {
+        Path from = start;
+        while (from != null && !Files.isDirectory(from)) from = from.getParent();
+        JFileChooser ch = new JFileChooser(from != null ? from.toFile() : null);
+        ch.setDialogTitle("Carpeta \"profiles\" de Modrinth");
+        ch.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        ch.setAcceptAllFileFilterUsed(false);
+        if (ch.showOpenDialog(parent) != JFileChooser.APPROVE_OPTION) return false;
+        Path dir = normalizeProfilesDir(ch.getSelectedFile().toPath());
+        if (subdirs(dir).isEmpty()) {
+            int ok = JOptionPane.showConfirmDialog(parent, "En " + dir + " no hay ningún perfil todavía.\n¿Usar esta carpeta igualmente?",
+                    PACK_NAME, JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (ok != JOptionPane.YES_OPTION) return false;
+        }
+        saveModrinthProfiles(dir);
+        return true;
+    }
+
+    static void saveModrinthProfiles(Path dir) {
+        settings.setProperty("modrinthProfiles", dir.toAbsolutePath().normalize().toString());
+        saveSettings(settings);
+    }
+
+    /** Tras cambiar la carpeta: si ahí ya hay un perfil del pack, se selecciona. */
+    static void afterModrinthFolderChanged() {
+        Path root = chosenModrinthProfiles();
+        for (Target t : detectTargets())
+            if (t.kind() == Kind.MODRINTH && root != null && t.dir().startsWith(root)
+                    && t.name().toLowerCase(Locale.ROOT).contains(PACK_NAME.toLowerCase(Locale.ROOT))) { chooseTarget(t); return; }
+        status.setText("Carpeta de Modrinth guardada. Si aún no tienes el perfil, usa \"Crear perfil en Modrinth\".");
+    }
 
     /** Genera el .mrpack, lo abre en Modrinth/Prism y espera a que aparezca la instancia nueva. */
     static void createInstance(Kind kind) {
@@ -1212,6 +1314,7 @@ public class Launcher {
                 loadNewsOnly();
                 sigil.spin(true);
                 long start = System.currentTimeMillis();
+                boolean[] askedFolder = {false};
                 if (waitTimer != null) waitTimer.stop();
                 waitTimer = new javax.swing.Timer(2000, e -> {
                     for (Target t : detectTargets()) {
@@ -1221,6 +1324,10 @@ public class Launcher {
                             chooseTarget(t);
                             return;
                         }
+                    }
+                    if (kind == Kind.MODRINTH && System.currentTimeMillis() - start > 60_000 && !askedFolder[0]) {
+                        askedFolder[0] = true;
+                        status.setText("¿No aparece? Comprueba la carpeta de perfiles en \"Instalar en\" ▾ → Carpeta de perfiles de Modrinth.");
                     }
                     if (System.currentTimeMillis() - start > 15 * 60_000) {
                         ((javax.swing.Timer) e.getSource()).stop();
@@ -1272,7 +1379,7 @@ public class Launcher {
         if (modrinthInstalled()) {
             JMenuItem it = new JMenuItem("＋ Crear perfil en Modrinth");
             it.setFont(body);
-            it.addActionListener(e -> createInstance(Kind.MODRINTH));
+            it.addActionListener(e -> { if (chosenModrinthProfiles() != null || askModrinthProfiles(parent)) createInstance(Kind.MODRINTH); });
             menu.add(it);
         }
         if (prismInstalled()) {
@@ -1281,6 +1388,11 @@ public class Launcher {
             it.addActionListener(e -> createInstance(Kind.PRISM));
             menu.add(it);
         }
+        JMenuItem mrDir = new JMenuItem("   Carpeta de perfiles de Modrinth…");
+        mrDir.setFont(body);
+        mrDir.setToolTipText(String.valueOf(guessModrinthProfiles()));
+        mrDir.addActionListener(e -> { if (pickModrinthProfiles(parent, guessModrinthProfiles())) afterModrinthFolderChanged(); });
+        menu.add(mrDir);
         JMenuItem other = new JMenuItem("   Otra carpeta…");
         other.setFont(body);
         other.addActionListener(e -> {
