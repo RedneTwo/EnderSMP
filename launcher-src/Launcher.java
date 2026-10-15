@@ -28,7 +28,7 @@ public class Launcher {
     static final String PACK_NAME = "EnderSMP";
     static final String REPO = "RedneTwo/EnderSMP";      // usuario/repositorio de GitHub
     static final String BRANCH = "main";
-    static final String LAUNCHER_VERSION = "1.0.0";     // súbelo al publicar un launcher nuevo
+    static final String LAUNCHER_VERSION = "1.0.1";     // súbelo al publicar un launcher nuevo
     static final String RAM = "-Xmx6G";                  // memoria para el perfil del launcher oficial
     static final String PACK_DIR = "Modpack";           // carpeta del repositorio con mods/, config/… (ojo a las mayúsculas)
     static final boolean AUTO_UPDATE = true;            // actualizar el modpack solo al abrir el launcher
@@ -397,9 +397,11 @@ public class Launcher {
     static List<Target> detectTargets() {
         List<Target> t = new ArrayList<>();
         t.add(new Target(Kind.OFFICIAL, "Launcher oficial", defaultGameDir(), null));
-        for (String app : List.of("ModrinthApp", "com.modrinth.theseus"))
-            for (Path p : subdirs(appData().resolve(app).resolve("profiles")))
-                t.add(new Target(Kind.MODRINTH, p.getFileName().toString(), p, null));
+        Set<Path> seen = new HashSet<>();
+        for (Path root : modrinthProfileRoots())
+            for (Path p : subdirs(root))
+                if (seen.add(p.toAbsolutePath().normalize()))
+                    t.add(new Target(Kind.MODRINTH, p.getFileName().toString(), p, null));
         List<Path> prismRoots = new ArrayList<>(List.of(appData().resolve("PrismLauncher").resolve("instances")));
         if (!isWindows() && !isMac()) prismRoots.add(Paths.get(System.getProperty("user.home"), ".var", "app",
                 "org.prismlauncher.PrismLauncher", "data", "PrismLauncher", "instances"));
@@ -432,8 +434,22 @@ public class Launcher {
         } catch (IOException e) { return false; }
     }
 
+    /** Posibles rutas de "Modrinth App.exe". */
+    static List<String> modrinthExes() {
+        List<String> l = new ArrayList<>();
+        String local = System.getenv("LOCALAPPDATA"), pf = System.getenv("ProgramFiles");
+        if (local != null) { l.add(local + "\\Modrinth App\\Modrinth App.exe"); l.add(local + "\\Programs\\Modrinth App\\Modrinth App.exe"); }
+        if (pf != null) l.add(pf + "\\Modrinth App\\Modrinth App.exe");
+        for (Path cfg : modrinthConfigDirs()) {
+            Path custom = modrinthCustomDir(cfg);
+            if (custom != null) l.add(custom.resolve("Modrinth App.exe").toString());
+        }
+        return l;
+    }
+
     static boolean openModrinth() {
         if (isWindows()) {
+            for (String exe : modrinthExes()) if (tryStart(exe)) return true;
             String local = System.getenv("LOCALAPPDATA"), pf = System.getenv("ProgramFiles");
             return (local != null && tryStart(local + "\\Modrinth App\\Modrinth App.exe"))
                     || (local != null && tryStart(local + "\\Programs\\Modrinth App\\Modrinth App.exe"))
@@ -441,6 +457,65 @@ public class Launcher {
         }
         if (isMac()) return tryStart("open", "-a", "Modrinth App");
         return tryStart("ModrinthApp") || tryStart("modrinth-app");
+    }
+
+    /** Carpetas de configuración de Modrinth App (donde está app.db). */
+    static List<Path> modrinthConfigDirs() {
+        List<Path> out = new ArrayList<>();
+        for (String app : List.of("ModrinthApp", "com.modrinth.theseus")) {
+            Path d = appData().resolve(app);
+            if (Files.isDirectory(d)) out.add(d);
+        }
+        return out;
+    }
+
+    interface DbQuery<T> { T run(java.sql.Connection c) throws Exception; }
+
+    /** Abre una copia de app.db (y su WAL) para no interferir con Modrinth mientras está abierto. */
+    static <T> T withModrinthDb(Path configDir, DbQuery<T> q) {
+        if (!Files.exists(configDir.resolve("app.db"))) return null;
+        Path tmp = null;
+        try {
+            Class.forName("org.sqlite.JDBC");
+            tmp = Files.createTempDirectory("mrdb");
+            Files.copy(configDir.resolve("app.db"), tmp.resolve("app.db"));
+            if (Files.exists(configDir.resolve("app.db-wal"))) Files.copy(configDir.resolve("app.db-wal"), tmp.resolve("app.db-wal"));
+            try (java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + tmp.resolve("app.db"))) {
+                return q.run(c);
+            }
+        } catch (Throwable e) {
+            return null;
+        } finally {
+            if (tmp != null) try (var w = Files.walk(tmp)) {
+                w.sorted(Comparator.reverseOrder()).forEach(x -> { try { Files.deleteIfExists(x); } catch (IOException ignored) { } });
+            } catch (IOException ignored) { }
+        }
+    }
+
+    static boolean hasTable(java.sql.Connection c, String table) throws java.sql.SQLException {
+        try (var rs = c.getMetaData().getTables(null, null, table, null)) { return rs.next(); }
+    }
+
+    /** Carpeta de datos elegida en Ajustes de Modrinth ("App directory"), o null si es la de por defecto. */
+    static Path modrinthCustomDir(Path configDir) {
+        String dir = withModrinthDb(configDir, c -> {
+            if (!hasTable(c, "settings")) return null;
+            try (var st = c.prepareStatement("SELECT custom_dir FROM settings LIMIT 1"); var rs = st.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        });
+        return dir == null || dir.isBlank() ? null : Paths.get(dir);
+    }
+
+    /** Todas las carpetas "profiles" de Modrinth: la de por defecto y la personalizada (p. ej. E:\\Modrinth\\profiles). */
+    static List<Path> modrinthProfileRoots() {
+        List<Path> roots = new ArrayList<>();
+        for (Path cfg : modrinthConfigDirs()) {
+            Path custom = modrinthCustomDir(cfg);
+            if (custom != null) roots.add(custom.resolve("profiles"));
+            roots.add(cfg.resolve("profiles"));
+        }
+        return roots;
     }
 
     /**
@@ -451,35 +526,28 @@ public class Launcher {
      */
     static String modrinthInstanceId(Path profileDir) {
         String folder = profileDir.getFileName().toString();
-        Path appDir = profileDir.getParent() != null ? profileDir.getParent().getParent() : null;
-        if (appDir == null || !Files.exists(appDir.resolve("app.db"))) return folder;
-        Path tmp = null;
-        try {
-            Class.forName("org.sqlite.JDBC");
-            // Copia de la base de datos (y su WAL) para no interferir con Modrinth mientras está abierto
-            tmp = Files.createTempDirectory("mrdb");
-            Files.copy(appDir.resolve("app.db"), tmp.resolve("app.db"));
-            if (Files.exists(appDir.resolve("app.db-wal"))) Files.copy(appDir.resolve("app.db-wal"), tmp.resolve("app.db-wal"));
-            try (java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + tmp.resolve("app.db"))) {
-                boolean hasTable;
-                try (var rs = c.getMetaData().getTables(null, null, "instances", null)) { hasTable = rs.next(); }
-                if (!hasTable) return folder; // Modrinth antiguo
-                try (var st = c.prepareStatement("SELECT id, path FROM instances");
-                     var rs = st.executeQuery()) {
+        // app.db de configuración (AppData) y, por si acaso, la que haya junto a la carpeta de perfiles
+        List<Path> dbs = new ArrayList<>(modrinthConfigDirs());
+        Path near = profileDir.getParent() != null ? profileDir.getParent().getParent() : null;
+        if (near != null && !dbs.contains(near)) dbs.add(near);
+        boolean anyDb = false;
+        for (Path cfg : dbs) {
+            if (!Files.exists(cfg.resolve("app.db"))) continue;
+            anyDb = true;
+            String id = withModrinthDb(cfg, c -> {
+                if (!hasTable(c, "instances")) return "";  // Modrinth antiguo: id = carpeta
+                try (var st = c.prepareStatement("SELECT id, path FROM instances"); var rs = st.executeQuery()) {
                     while (rs.next()) {
                         String path = rs.getString(2).replace('\\', '/');
                         if (path.equals(folder) || path.endsWith("/" + folder)) return rs.getString(1);
                     }
                 }
-            }
-            return null;
-        } catch (Throwable e) {
-            return null;
-        } finally {
-            if (tmp != null) try (var w = Files.walk(tmp)) {
-                w.sorted(Comparator.reverseOrder()).forEach(x -> { try { Files.deleteIfExists(x); } catch (IOException ignored) { } });
-            } catch (IOException ignored) { }
+                return null;
+            });
+            if ("".equals(id)) return folder;
+            if (id != null) return id;
         }
+        return anyDb ? null : folder;
     }
 
     /** Modrinth App arranca un perfil con el enlace modrinth://launch/instance/<id>. */
@@ -553,9 +621,7 @@ public class Launcher {
 
     static boolean openWithModrinth(Path mrpack) {
         if (isWindows()) {
-            String local = System.getenv("LOCALAPPDATA"), pf = System.getenv("ProgramFiles");
-            for (String exe : new String[]{local + "\\Modrinth App\\Modrinth App.exe", local + "\\Programs\\Modrinth App\\Modrinth App.exe",
-                    pf + "\\Modrinth App\\Modrinth App.exe"})
+            for (String exe : modrinthExes())
                 if (tryStart(exe, mrpack.toString())) return true;
         }
         if (isMac() && tryStart("open", "-a", "Modrinth App", mrpack.toString())) return true;
@@ -1102,6 +1168,8 @@ public class Launcher {
         boolean firstTime = settings.getProperty("targetKind") == null;
         if (firstTime && !anyLauncherInstalled()) { noLauncher(f); return; }
         boolean m = modrinthInstalled(), p = prismInstalled();
+        // Ya existe un perfil "EnderSMP" en Modrinth/Prism: se usa directamente y se recuerda
+        if (firstTime && target.kind() != Kind.OFFICIAL) setTarget(target, true);
         if (!firstTime || target.kind() != Kind.OFFICIAL || (!m && !p)) { check(); return; }
         List<String> opts = new ArrayList<>();
         if (m) opts.add("Modrinth");
@@ -1141,6 +1209,7 @@ public class Launcher {
                     return;
                 }
                 status.setText("Confirma la instalación en " + app + "… este launcher la detectará solo.");
+                loadNewsOnly();
                 sigil.spin(true);
                 long start = System.currentTimeMillis();
                 if (waitTimer != null) waitTimer.stop();
@@ -1161,6 +1230,14 @@ public class Launcher {
                 });
                 waitTimer.start();
             }
+        }.execute();
+    }
+
+    /** Carga solo las novedades (mientras se espera a que Modrinth/Prism cree la instancia). */
+    static void loadNewsOnly() {
+        new SwingWorker<String, Void>() {
+            protected String doInBackground() { return newsHtml(latestCommit()); }
+            protected void done() { try { news.setText(get()); news.setCaretPosition(0); } catch (Exception ignored) { } }
         }.execute();
     }
 
