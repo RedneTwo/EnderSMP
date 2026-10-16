@@ -5,7 +5,7 @@
   "subtitulo": "Modpack · Minecraft 1.20.1 · Forge 47.4.12",
   "tituloVentana": "EnderSMP Launcher",
   "tituloNovedades": "Novedades",
-  "tamanoTitulo": 60,
+  "tamanoTitulo": 56,
 
   "colorTitulo": "#FFFFFF",
   "texto": "#EEE8F6",
@@ -20,7 +20,7 @@
   "fondoAbajo": "#2B1745",
   "oscurecerFondo": 0.35,
 
-  "logoGira": true,
-  "halo": true,
+  "logoGira": false,
+  "halo": false,
   "tamanoLogo": 1.0
 }

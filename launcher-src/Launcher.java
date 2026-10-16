@@ -726,12 +726,13 @@ public class Launcher {
     //  launcher-assets/logo.png   -> imagen grande de la izquierda (PNG con transparencia).
     //  launcher-assets/icono.png  -> icono de la ventana (y del .exe al compilar).
     //  launcher-assets/tema.json  -> colores, título, subtítulo, si el logo gira…
-    //  launcher-assets/fuente.ttf -> tipografía de títulos y botones (opcional).
+    //  launcher-assets/fuente.ttf -> tipografía de botones y "Novedades" (opcional).
+    //  launcher-assets/fuente-titulo.ttf -> tipografía solo del título grande (opcional).
     //
     // El launcher los descarga de GitHub al abrirse y los guarda en caché, así que basta con
     // subir otra imagen al repositorio: la próxima vez que alguien abra el launcher, la verá.
 
-    static final String[] ASSET_FILES = {"fondo.png", "logo.png", "icono.png", "tema.json", "fuente.ttf"};
+    static final String[] ASSET_FILES = {"fondo.png", "logo.png", "icono.png", "tema.json", "fuente.ttf", "fuente-titulo.ttf"};
     static Image bgImage, logoImage, iconImage;
     static Map<String, Object> theme = new LinkedHashMap<>();
 
@@ -829,7 +830,7 @@ public class Launcher {
         }
         return changed;
     }
-    static Font gothicBold, gothicMedium, body;
+    static Font gothicBold, gothicMedium, body, titleFont;
 
     static Font loadFont(String res, float fallbackSize) {
         try (InputStream in = Launcher.class.getResourceAsStream("/" + res)) {
@@ -852,6 +853,17 @@ public class Launcher {
                 gothicMedium = custom;
             }
         } catch (Exception ignored) { }
+        // Título: launcher-assets/fuente-titulo.ttf (caché) -> la que va dentro del launcher -> la de botones
+        titleFont = null;
+        try {
+            Path f = assetCache().resolve("fuente-titulo.ttf");
+            if (Files.exists(f)) titleFont = Font.createFont(Font.TRUETYPE_FONT, f.toFile());
+        } catch (Exception ignored) { }
+        if (titleFont == null) try (InputStream in = Launcher.class.getResourceAsStream("/fuente-titulo.ttf")) {
+            if (in != null) titleFont = Font.createFont(Font.TRUETYPE_FONT, in);
+        } catch (Exception ignored) { }
+        if (titleFont != null) GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(titleFont);
+        else titleFont = gothicBold;
     }
 
     static void loadStyle() {
@@ -1069,7 +1081,7 @@ public class Launcher {
         JPanel header = new JPanel();
         header.setOpaque(false);
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-        titleLabel = label(themeText("titulo", PACK_NAME), gothicBold.deriveFont((float) themeNum("tamanoTitulo", 60)), color("colorTitulo", Color.WHITE));
+        titleLabel = label(themeText("titulo", PACK_NAME), titleFont.deriveFont((float) themeNum("tamanoTitulo", 60)), color("colorTitulo", Color.WHITE));
         subtitleLabel = label(subtitle(), body.deriveFont(12f), MUTED);
         header.add(titleLabel);
         header.add(subtitleLabel);
@@ -1159,7 +1171,7 @@ public class Launcher {
         if (iconImage != null) frame.setIconImage(iconImage);
         frame.setTitle(themeText("tituloVentana", PACK_NAME + " Launcher"));
         titleLabel.setText(themeText("titulo", PACK_NAME));
-        titleLabel.setFont(gothicBold.deriveFont((float) themeNum("tamanoTitulo", 60)));
+        titleLabel.setFont(titleFont.deriveFont((float) themeNum("tamanoTitulo", 60)));
         titleLabel.setForeground(color("colorTitulo", Color.WHITE));
         subtitleLabel.setText(subtitle());
         newsTitle.setText(themeText("tituloNovedades", "Novedades"));

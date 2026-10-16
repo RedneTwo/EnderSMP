@@ -49,6 +49,7 @@ Todo lo visual sale de esta carpeta. Cambia un archivo, súbelo a GitHub y **la 
 | `logo.png` | Imagen grande de la izquierda (gira mientras descarga) | PNG cuadrado con fondo transparente, 512×512 |
 | `icono.png` | Icono de la ventana y del `.exe` | PNG cuadrado, 256×256 |
 | `fuente.ttf` | Tipografía de títulos y botones (opcional) | Cualquier `.ttf` |
+| `fuente-titulo.ttf` | Tipografía solo del título grande (ahora: Monocraft cursiva, estilo Minecraft, licencia OFL) | Cualquier `.ttf` |
 | `tema.json` | Colores y textos | Ver abajo |
 
 `tema.json` (si quitas una línea, se usa el valor por defecto; colores en `#RRGGBB`):
