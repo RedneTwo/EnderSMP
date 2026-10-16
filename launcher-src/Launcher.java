@@ -28,7 +28,7 @@ public class Launcher {
     static final String PACK_NAME = "EnderSMP";
     static final String REPO = "RedneTwo/EnderSMP";      // usuario/repositorio de GitHub
     static final String BRANCH = "main";
-    static final String LAUNCHER_VERSION = "1.0.2";     // súbelo al publicar un launcher nuevo
+    static final String LAUNCHER_VERSION = "1.0.3";     // súbelo al publicar un launcher nuevo
     static final String RAM = "-Xmx6G";                  // memoria para el perfil del launcher oficial
     static final String PACK_DIR = "Modpack";           // carpeta del repositorio con mods/, config/… (ojo a las mayúsculas)
     static final boolean AUTO_UPDATE = true;            // actualizar el modpack solo al abrir el launcher
@@ -67,8 +67,12 @@ public class Launcher {
 
     record PackFile(String path, String sha1, long size) {}
     record Manifest(String version, String minecraft, String forge, String commit, List<PackFile> files, List<String> mirrorDirs) {}
-    record Plan(Manifest manifest, List<PackFile> downloads, List<Path> deletions, long bytes) {
-        boolean upToDate() { return downloads.isEmpty() && deletions.isEmpty(); }
+    /**
+     * deletions: archivos ajenos en carpetas espejo (mods/), se pregunta antes de quitarlos.
+     * stale: archivos que instaló este launcher y ya no están en GitHub, se quitan solos.
+     */
+    record Plan(Manifest manifest, List<PackFile> downloads, List<Path> deletions, List<String> stale, long bytes) {
+        boolean upToDate() { return downloads.isEmpty() && deletions.isEmpty() && stale.isEmpty(); }
     }
 
     interface Progress { void update(String text, double fraction); }
@@ -181,12 +185,41 @@ public class Launcher {
                 for (Path p : ds) if (Files.isRegularFile(p) && !wanted.contains(p.normalize())) deletions.add(p);
             }
         }
-        return new Plan(m, downloads, deletions, bytes);
+        List<String> stale = new ArrayList<>();
+        Set<String> inManifest = new HashSet<>();
+        for (PackFile f : m.files()) inManifest.add(f.path());
+        for (String rel : state.stringPropertyNames()) {
+            if (rel.startsWith("_") || inManifest.contains(rel)) continue;
+            Path local;
+            try { local = safeResolve(gameDir, rel); } catch (IOException e) { continue; }
+            if (deletions.contains(local)) continue;
+            // Solo si el jugador no lo ha cambiado (sigue siendo el que pusimos)
+            try { if (Files.isRegularFile(local) && sha1(local).equals(state.getProperty(rel))) stale.add(rel); }
+            catch (IOException ignored) { }
+        }
+        return new Plan(m, downloads, deletions, stale, bytes);
+    }
+
+    /** Si donde tiene que haber una carpeta hay un archivo que puso este launcher, se quita. */
+    static void clearFileInTheWay(Path gameDir, Path dir, Properties state) throws IOException {
+        for (Path d = dir; d != null && d.startsWith(gameDir) && !d.equals(gameDir); d = d.getParent()) {
+            if (Files.isRegularFile(d)) {
+                String rel = gameDir.relativize(d).toString().replace('\\', '/');
+                if (state.getProperty(rel) == null) throw new IOException("Hay un archivo \"" + d.getFileName() + "\" donde debería haber una carpeta:\n" + d);
+                Files.delete(d);
+                state.remove(rel);
+            }
+        }
     }
 
     static void apply(Path gameDir, Plan plan, Progress progress) throws Exception {
         Files.createDirectories(gameDir);
         Properties state = loadState(gameDir);
+        for (String rel : plan.stale()) {
+            progress.update("Quitando " + rel, 0);
+            Files.deleteIfExists(safeResolve(gameDir, rel));
+            state.remove(rel);
+        }
         long done = 0, total = Math.max(1, plan.bytes());
         int i = 0;
         for (PackFile f : plan.downloads()) {
@@ -194,6 +227,7 @@ public class Launcher {
             String name = f.path().substring(f.path().lastIndexOf('/') + 1);
             progress.update("Descargando " + name + " (" + i + "/" + plan.downloads().size() + ")", (double) done / total);
             Path target = safeResolve(gameDir, f.path());
+            clearFileInTheWay(gameDir, target.getParent(), state);
             Files.createDirectories(target.getParent());
             Path tmp = target.resolveSibling(target.getFileName() + ".part");
             HttpRequest req = HttpRequest.newBuilder(URI.create(rawUrl(plan.manifest().commit(), f.path())))
@@ -398,10 +432,15 @@ public class Launcher {
         List<Target> t = new ArrayList<>();
         t.add(new Target(Kind.OFFICIAL, "Launcher oficial", defaultGameDir(), null));
         Set<Path> seen = new HashSet<>();
+        Set<String> registered = modrinthRegisteredFolders();   // null = no se pudo saber
         for (Path root : modrinthProfileRoots())
-            for (Path p : subdirs(root))
+            for (Path p : subdirs(root)) {
+                String folder = p.getFileName().toString();
+                // Un perfil borrado en Modrinth puede dejar la carpeta: si no está en app.db, no es un perfil
+                if (registered != null && !registered.contains(folder.toLowerCase(Locale.ROOT))) continue;
                 if (seen.add(p.toAbsolutePath().normalize()))
-                    t.add(new Target(Kind.MODRINTH, p.getFileName().toString(), p, null));
+                    t.add(new Target(Kind.MODRINTH, folder, p, null));
+            }
         List<Path> prismRoots = new ArrayList<>(List.of(appData().resolve("PrismLauncher").resolve("instances")));
         if (!isWindows() && !isMac()) prismRoots.add(Paths.get(System.getProperty("user.home"), ".var", "app",
                 "org.prismlauncher.PrismLauncher", "data", "PrismLauncher", "instances"));
@@ -526,6 +565,43 @@ public class Launcher {
             roots.add(cfg.resolve("profiles"));
         }
         return roots;
+    }
+
+    static Set<String> registeredCache;
+    static long registeredStamp, registeredReadAt;
+
+    /**
+     * Nombres de carpeta (en minúsculas) de los perfiles que Modrinth tiene registrados en app.db.
+     * null si no hay app.db con tabla de instancias (Modrinth antiguo): entonces vale cualquier carpeta.
+     * Se guarda en caché y solo se relee si app.db cambió (y como mucho cada 10 s): puede pesar cientos de MB.
+     */
+    static synchronized Set<String> modrinthRegisteredFolders() {
+        long stamp = 0;
+        for (Path cfg : modrinthConfigDirs())
+            for (String n : new String[]{"app.db", "app.db-wal"})
+                try { Path f = cfg.resolve(n); if (Files.exists(f)) stamp += Files.getLastModifiedTime(f).toMillis() + Files.size(f); }
+                catch (IOException ignored) { }
+        long now = System.currentTimeMillis();
+        if (registeredReadAt != 0 && (stamp == registeredStamp || now - registeredReadAt < 10_000)) return registeredCache;
+        Set<String> all = null;
+        for (Path cfg : modrinthConfigDirs()) {
+            Set<String> names = withModrinthDb(cfg, c -> {
+                if (!hasTable(c, "instances")) return null;
+                Set<String> out = new HashSet<>();
+                try (var st = c.prepareStatement("SELECT path FROM instances"); var rs = st.executeQuery()) {
+                    while (rs.next()) {
+                        String path = rs.getString(1).replace('\\', '/');
+                        out.add(path.substring(path.lastIndexOf('/') + 1).toLowerCase(Locale.ROOT));
+                    }
+                }
+                return out;
+            });
+            if (names != null) { if (all == null) all = new HashSet<>(); all.addAll(names); }
+        }
+        registeredCache = all;
+        registeredStamp = stamp;
+        registeredReadAt = now;
+        return all;
     }
 
     /** Carpeta "profiles" que el jugador eligió a mano en el launcher (o null). */
@@ -1059,7 +1135,10 @@ public class Launcher {
         loadAssets();
         loadStyle();
         settings = loadSettings();
-        setTarget(targetFromSettings(settings, detectTargets()), false);
+        Target initial = targetFromSettings(settings, detectTargets());
+        // El perfil guardado ya no existe (p. ej. se borró en Modrinth y se creó otro): recordar el nuevo
+        boolean changed = settings.getProperty("targetKind") != null && !initial.dir().toString().equals(settings.getProperty("targetDir"));
+        setTarget(initial, changed);
 
         JFrame f = new JFrame(themeText("tituloVentana", PACK_NAME + " Launcher"));
         frame = f;
